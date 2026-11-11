@@ -16,67 +16,111 @@ import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * الفقاعة العائمة: تظهر فوق أي تطبيق (مثل اللعبة).
- * - لمسة واحدة: كتم / إلغاء الكتم
- * - ضغط مطول: يطلب من الخدمة إظهار زر إنهاء المكالمة بجانبها
- * - سحب: تحريك الفقاعة
- * - النقطة الصغيرة أعلى اليمين: مؤشر جودة الاتصال
+ * الفقاعة العائمة «اثنان في واحد» — تظهر فوق أي تطبيق (مثل اللعبة).
+ *
+ * الوضع المضغوط:
+ *  - ضغطة سريعة: توسّع قائمة صغيرة بجانب الفقاعة فيها زر الرسائل
+ *  - ضغط مطول: قائمة فيها زر الرسائل + زر إنهاء المكالمة
+ *  - سحب: تحريك الفقاعة
+ *
+ * القائمة الموسعة:
+ *  - الفقاعة نفسها = زر كتم/تفعيل المايك (ضغطة)
+ *  - زر الرسائل: يفتح نافذة الكتابة العائمة
+ *  - زر الإنهاء (أحمر): يظهر فقط مع الضغط المطول
+ *
+ * النقطة الصغيرة أعلى يمين الفقاعة: مؤشر جودة الاتصال.
  */
 class BubbleView(context: Context) : FrameLayout(context) {
 
     companion object {
-        const val SIZE_DP = 62
+        const val SIZE_DP = 62          // قطر الفقاعة
+        const val BTN_DP = 48           // قطر أزرار القائمة
+        const val GAP_DP = 8            // الفراغ بين الأزرار
         private const val CLICK_SLOP_PX = 14
         private const val LONG_PRESS_MS = 550L
     }
 
-    var onToggleMute: (() -> Unit)? = null
-    var onExpandRequested: ((Boolean) -> Unit)? = null
-    var onDrag: ((Float, Float) -> Unit)? = null        // dx, dy من نقطة البداية
+    /** تغيّر حجم القائمة: extraPx = العرض الإضافي (0 = مطوية)، side = -1 يسار الفقاعة / +1 يمينها */
+    var onMenuChanged: ((extraPx: Int, side: Int) -> Unit)? = null
+    /** ضغطة على الفقاعة وهي موسعة = كتم/تفعيل */
+    var onMicAction: (() -> Unit)? = null
+    /** ضغطة على زر الرسائل */
+    var onMessageAction: (() -> Unit)? = null
+    /** ضغطة على زر الإنهاء */
+    var onEndAction: (() -> Unit)? = null
+    var onDrag: ((Float, Float) -> Unit)? = null        // rawX, rawY من الشاشة
     var onDragEnd: (() -> Unit)? = null
 
     val sizePx: Int = (SIZE_DP * resources.displayMetrics.density).toInt()
+    val btnPx: Int = (BTN_DP * resources.displayMetrics.density).toInt()
+    val gapPx: Int = (GAP_DP * resources.displayMetrics.density).toInt()
     private val density = resources.displayMetrics.density
 
+    private val bubbleBody: FrameLayout
     private val micIcon: ImageView
     private val qualityDot: View
+    private val msgBtn: ImageView
+    private val endBtn: ImageView
 
     private var downRawX = 0f
     private var downRawY = 0f
     private var totalDrag = 0f
     private var dragging = false
-    private var expanded = false
+    private var menuExpanded = false
+
+    /** العرض الحالي للنافذة: الفقاعة + الأزرار (يقرؤها الخدمة لحساب الحدود) */
+    val extraWidthPx: Int
+        get() = when {
+            !menuExpanded -> 0
+            endBtn.visibility == View.VISIBLE -> 2 * (btnPx + gapPx)
+            else -> btnPx + gapPx
+        }
+
+    /** جهة ظهور الأزرار: -1 يسار الفقاعة، +1 يمينها */
+    var menuSide: Int = -1
+        private set
 
     private val longPressRunnable = Runnable {
-        if (!dragging) { expanded = true; vibrate(); onExpandRequested?.invoke(true) }
+        if (!dragging) {
+            vibrate()
+            if (menuExpanded) {
+                // ضغط مطول والموسعة مسبقاً: لا شيء
+            } else {
+                showMenu(withEnd = true)
+            }
+        }
     }
 
     init {
-        val grad = GradientDrawable(
-            GradientDrawable.Orientation.TL_BR,
-            intArrayOf(0xFF12E2FF.toInt(), 0xFF0A66FF.toInt())
-        ).apply { shape = GradientDrawable.OVAL }
-
-        val ring = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setStroke((2 * density).toInt(), Color.argb(128, 255, 255, 255))
+        // جسم الفقاعة (دائرة متدرجة + أيقونة المايك + نقطة الجودة)
+        bubbleBody = FrameLayout(context).apply {
+            layoutParams = LayoutParams(sizePx, sizePx, Gravity.START or Gravity.CENTER_VERTICAL)
+            val grad = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(0xFF12E2FF.toInt(), 0xFF0A66FF.toInt())
+            ).apply { shape = GradientDrawable.OVAL }
+            val ring = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setStroke((2 * density).toInt(), Color.argb(128, 255, 255, 255))
+            }
+            background = LayerDrawable(arrayOf(ring, grad)).apply {
+                val inset = (3 * density).toInt()
+                setLayerInset(1, inset, inset, inset, inset)
+            }
         }
-        background = LayerDrawable(arrayOf(ring, grad)).apply {
-            val inset = (3 * density).toInt()
-            setLayerInset(1, inset, inset, inset, inset)
-        }
+        addView(bubbleBody)
 
         micIcon = ImageView(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
+            layoutParams = LayoutParams(
                 (30 * density).toInt(), (30 * density).toInt(), Gravity.CENTER
             )
             setImageResource(R.drawable.ic_mic_on)
             setColorFilter(Color.WHITE)
         }
-        addView(micIcon)
+        bubbleBody.addView(micIcon)
 
         qualityDot = View(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
+            layoutParams = LayoutParams(
                 (11 * density).toInt(), (11 * density).toInt(),
                 Gravity.TOP or Gravity.END
             ).apply {
@@ -89,8 +133,105 @@ class BubbleView(context: Context) : FrameLayout(context) {
                 setStroke((1 * density).toInt(), Color.BLACK)
             }
         }
-        addView(qualityDot)
+        bubbleBody.addView(qualityDot)
+
+        // زر الرسائل
+        msgBtn = ImageView(context).apply {
+            layoutParams = LayoutParams(btnPx, btnPx, Gravity.START or Gravity.CENTER_VERTICAL)
+                .apply { leftMargin = 0 }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xF2159E8E.toInt())
+            }
+            setImageResource(R.drawable.ic_chat)
+            setColorFilter(Color.WHITE)
+            setPadding(
+                (12 * density).toInt(), (12 * density).toInt(),
+                (12 * density).toInt(), (12 * density).toInt()
+            )
+            visibility = View.GONE
+            setOnClickListener {
+                vibrate()
+                onMessageAction?.invoke()
+            }
+        }
+        addView(msgBtn)
+
+        // زر الإنهاء
+        endBtn = ImageView(context).apply {
+            layoutParams = LayoutParams(btnPx, btnPx, Gravity.START or Gravity.CENTER_VERTICAL)
+                .apply { leftMargin = 0 }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xE6FF3B5C.toInt())
+            }
+            setImageResource(R.drawable.ic_end_call)
+            setColorFilter(Color.WHITE)
+            setPadding(
+                (11 * density).toInt(), (11 * density).toInt(),
+                (11 * density).toInt(), (11 * density).toInt()
+            )
+            visibility = View.GONE
+            setOnClickListener {
+                onEndAction?.invoke()
+            }
+        }
+        addView(endBtn)
     }
+
+    // ===================== القائمة =====================
+
+    fun showMenu(withEnd: Boolean) {
+        val screenW = resources.displayMetrics.widthPixels
+        // جهة الأزرار: بعيداً عن أقرب حافة
+        menuSide = if (downRawX > screenW / 2f) -1 else 1
+        menuExpanded = true
+        endBtn.visibility = if (withEnd) View.VISIBLE else View.GONE
+        msgBtn.visibility = View.VISIBLE
+        layoutMenu()
+        onMenuChanged?.invoke(extraWidthPx, menuSide)
+    }
+
+    fun collapseMenu() {
+        if (!menuExpanded) return
+        menuExpanded = false
+        msgBtn.visibility = View.GONE
+        endBtn.visibility = View.GONE
+        layoutMenu()
+        onMenuChanged?.invoke(0, 0)
+    }
+
+    fun isExpanded(): Boolean = menuExpanded
+
+    /** ترتيب الأطفال أفقياً حسب الجهة:
+     *  side<0: [الإنهاء][الرسائل][الفقاعة]   side>0: [الفقاعة][الرسائل][الإنهاء] */
+    private fun layoutMenu() {
+        val before = mutableListOf<View>()   // أزرار يسار الفقاعة
+        val after = mutableListOf<View>()    // أزرار يمين الفقاعة
+        if (menuExpanded) {
+            if (menuSide < 0) {
+                // [الإنهاء][الرسائل][الفقاعة] — الإنهاء الأبعد
+                if (endBtn.visibility == View.VISIBLE) before.add(endBtn)
+                before.add(msgBtn)
+            } else {
+                // [الفقاعة][الرسائل][الإنهاء] — الإنهاء الأبعد
+                after.add(msgBtn)
+                if (endBtn.visibility == View.VISIBLE) after.add(endBtn)
+            }
+        }
+        var left = 0
+        fun place(v: View, w: Int, gap: Int) {
+            val lp = v.layoutParams as LayoutParams
+            lp.leftMargin = left + if (left == 0) 0 else gap
+            v.layoutParams = lp
+            left = lp.leftMargin + w
+        }
+        for (v in before) place(v, btnPx, gapPx)
+        place(bubbleBody, sizePx, 0)
+        for (v in after) place(v, btnPx, gapPx)
+    }
+
+    // ===================== الحالة =====================
 
     fun setMuted(muted: Boolean) {
         micIcon.setImageResource(if (muted) R.drawable.ic_mic_off else R.drawable.ic_mic_on)
@@ -110,17 +251,28 @@ class BubbleView(context: Context) : FrameLayout(context) {
         (qualityDot.background as? GradientDrawable)?.setColor(color)
     }
 
-    /** تُستدعى من الخدمة بعد إخفاء زر الإنهاء */
-    fun collapse() { expanded = false }
-
-    fun isExpanded(): Boolean = expanded
-
     private fun vibrate() {
         try {
             @Suppress("DEPRECATION")
             val v = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             v.vibrate(VibrationEffect.createOneShot(40, 120))
         } catch (_: Exception) {}
+    }
+
+    // ===================== اللمس =====================
+
+    private fun hitRegion(x: Float, y: Float): Int {
+        // 0 = فقاعة / فراغ، 1 = زر رسائل، 2 = زر إنهاء
+        if (y < 0 || y > height) return 0
+        if (msgBtn.visibility == View.VISIBLE) {
+            val l = msgBtn.left
+            if (x >= l && x <= l + msgBtn.width) return 1
+        }
+        if (endBtn.visibility == View.VISIBLE) {
+            val l = endBtn.left
+            if (x >= l && x <= l + endBtn.width) return 2
+        }
+        return 0
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -132,6 +284,12 @@ class BubbleView(context: Context) : FrameLayout(context) {
                     downRawY = event.rawY
                     totalDrag = 0f
                     dragging = false
+                    val region = hitRegion(event.x, event.y)
+                    if (region == 1 || region == 2) {
+                        // الأزرار تتعامل بنفسها (OnClickListener)
+                        removeCallbacks(longPressRunnable)
+                        return@setOnTouchListener false
+                    }
                     postDelayed(longPressRunnable, LONG_PRESS_MS)
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -141,24 +299,22 @@ class BubbleView(context: Context) : FrameLayout(context) {
                     if (totalDrag > CLICK_SLOP_PX) {
                         dragging = true
                         removeCallbacks(longPressRunnable)
-                        if (expanded) {
-                            expanded = false
-                            onExpandRequested?.invoke(false)
-                        }
+                        if (menuExpanded) collapseMenu()
                     }
-                    if (dragging) onDrag?.invoke(dx, dy)
+                    if (dragging) onDrag?.invoke(event.rawX, event.rawY)
                 }
                 MotionEvent.ACTION_UP -> {
                     removeCallbacks(longPressRunnable)
                     when {
-                        dragging -> {
-                            onDragEnd?.invoke()
-                            if (expanded) onExpandRequested?.invoke(false)
+                        dragging -> onDragEnd?.invoke()
+                        menuExpanded -> {
+                            // ضغطة على الفقاعة/الفراغ والموسعة = كتم/تفعيل
+                            vibrate()
+                            onMicAction?.invoke()
                         }
-                        expanded -> { /* لمسة أثناء التوسع: لا شيء */ }
                         else -> {
                             vibrate()
-                            onToggleMute?.invoke()
+                            showMenu(withEnd = false)
                         }
                     }
                 }

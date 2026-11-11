@@ -250,7 +250,8 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:layout_marginTop="18dp"
-            android:text="بدون أي إعدادات — الإشارة عبر سحابة مجانية والصوت مباشرة بين الهاتفين (P2P) • استهلاك ≈ 12 ميجا/ساعة"
+            android:gravity="center"
+            android:text="الفقاعة العائمة: ضغطة = قائمة (كتم + رسالة) • ضغط مطول = قائمة مع الإنهاء\nبدون أي إعدادات — الإشارة عبر سحابة مجانية والصوت مباشرة بين الهاتفين (P2P) • استهلاك ≈ 12 ميجا/ساعة"
             android:textColor="@color/text_secondary"
             android:textSize="11sp" />
     </LinearLayout>

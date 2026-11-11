@@ -7,8 +7,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.DataChannel
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
@@ -41,11 +43,14 @@ class CallEngine(private val context: Context) {
     interface Listener {
         fun onLocalIce(candidate: IceCandidate)
         fun onPeerConnectionState(state: PeerConnection.PeerConnectionState)
+        /** وصلت رسالة نصية سريعة من صديقك عبر قناة البيانات */
+        fun onChatMessage(text: String)
     }
 
     private val main = Handler(Looper.getMainLooper())
     private var factory: PeerConnectionFactory? = null
     private var pc: PeerConnection? = null
+    private var chatChannel: DataChannel? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
     private var audioManager: AudioManager? = null
@@ -97,7 +102,9 @@ class CallEngine(private val context: Context) {
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
             override fun onAddStream(stream: MediaStream) {}
             override fun onRemoveStream(stream: MediaStream) {}
-            override fun onDataChannel(dc: org.webrtc.DataChannel) {}
+            override fun onDataChannel(dc: org.webrtc.DataChannel) {
+                Log.i(TAG, "remote data channel: ${dc.label()}")
+            }
             override fun onRenegotiationNeeded() {}
             override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
                 Log.i(TAG, "Remote audio track added")
@@ -105,6 +112,21 @@ class CallEngine(private val context: Context) {
         }
 
         val connection = factory?.createPeerConnection(config, observer) ?: return false
+
+        // قناة بيانات مُتفقاً عليها (negotiated) — الجهتان تنشئانها بنفس المعرّف
+        // تُستخدم للرسائل السريعة القابلة للنسخ (كود الغرفة مثلاً)
+        try {
+            val dcInit = DataChannel.Init().apply {
+                ordered = true
+                negotiated = true
+                id = 1
+            }
+            val dc = connection.createDataChannel("gtalk-msg", dcInit)
+            dc.registerObserver(chatObserver)
+            chatChannel = dc
+        } catch (e: Exception) {
+            Log.w(TAG, "data channel: ${e.message}")
+        }
 
         // الميكروفون
         val src = factory!!.createAudioSource(MediaConstraints())
@@ -209,6 +231,43 @@ class CallEngine(private val context: Context) {
         return lines.joinToString("\r\n")
     }
 
+    // ---------- الرسائل السريعة (DataChannel) ----------
+
+    private val chatObserver = object : DataChannel.Observer {
+        override fun onBufferedAmountChange(previous: Long) {}
+        override fun onStateChange() {
+            Log.i(TAG, "chat channel state: ${chatChannel?.state()}")
+        }
+        override fun onMessage(buffer: DataChannel.Buffer) {
+            try {
+                val bytes = ByteArray(buffer.data.remaining())
+                buffer.data.get(bytes)
+                val text = String(bytes, Charsets.UTF_8)
+                main.post { listener?.onChatMessage(text) }
+            } catch (e: Exception) {
+                Log.w(TAG, "chat rx: ${e.message}")
+            }
+        }
+    }
+
+    /** إرسال رسالة نصية — يعيد true إذا أُرسلت فعلاً */
+    fun sendChat(text: String): Boolean {
+        val dc = chatChannel ?: return false
+        if (dc.state() != DataChannel.State.OPEN) return false
+        return try {
+            val json = JSONObject().put("t", "msg").put("text", text).toString()
+            val bytes = json.toByteArray(Charsets.UTF_8)
+            val buf = DataChannel.Buffer(java.nio.ByteBuffer.wrap(bytes), false)
+            dc.send(buf)
+        } catch (e: Exception) {
+            Log.w(TAG, "chat tx: ${e.message}")
+            false
+        }
+    }
+
+    fun isChatReady(): Boolean =
+        chatChannel?.state() == DataChannel.State.OPEN
+
     // ---------- كتم الصوت ----------
 
     fun toggleMute(): Boolean {
@@ -267,9 +326,11 @@ class CallEngine(private val context: Context) {
 
     fun closePeerConnection() {
         stopStatsLoop()
+        try { chatChannel?.close() } catch (_: Exception) {}
         try { pc?.close() } catch (_: Exception) {}
         try { audioSource?.dispose() } catch (_: Exception) {}
         pc = null
+        chatChannel = null
         audioSource = null
         audioTrack = null
     }
