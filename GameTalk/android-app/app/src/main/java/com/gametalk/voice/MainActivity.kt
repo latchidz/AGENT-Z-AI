@@ -26,7 +26,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var createBtn: Button
     private lateinit var joinBtn: Button
     private lateinit var codeInput: EditText
-    private lateinit var serverInput: EditText
     private lateinit var micPermBtn: Button
     private lateinit var overlayPermBtn: Button
     private lateinit var endBtn: Button
@@ -58,7 +57,6 @@ class MainActivity : AppCompatActivity() {
         createBtn = findViewById(R.id.createBtn)
         joinBtn = findViewById(R.id.joinBtn)
         codeInput = findViewById(R.id.codeInput)
-        serverInput = findViewById(R.id.serverInput)
         micPermBtn = findViewById(R.id.micPermBtn)
         overlayPermBtn = findViewById(R.id.overlayPermBtn)
         endBtn = findViewById(R.id.endBtn)
@@ -69,7 +67,6 @@ class MainActivity : AppCompatActivity() {
         codeInput.setTextAppearance(this, R.style.CodeInputStyle)
 
         val prefs = getSharedPreferences("gametalk_prefs", MODE_PRIVATE)
-        serverInput.setText(prefs.getString("server_url", "") ?: "")
         codeInput.setText(prefs.getString("last_room", "") ?: "")
 
         copyBtn.setOnClickListener {
@@ -86,8 +83,7 @@ class MainActivity : AppCompatActivity() {
         createBtn.setOnClickListener {
             if (!hasMicPermission()) { requestMic(); return@setOnClickListener }
             if (!Settings.canDrawOverlays(this)) { requestOverlay(); return@setOnClickListener }
-            saveServer()
-            BubbleService.start(this, BubbleService.ACTION_CREATE, null, serverUrlOrNull())
+            BubbleService.start(this, BubbleService.ACTION_CREATE)
             Toast.makeText(this, "جارٍ إنشاء الغرفة...", Toast.LENGTH_SHORT).show()
         }
 
@@ -99,25 +95,13 @@ class MainActivity : AppCompatActivity() {
             }
             if (!hasMicPermission()) { requestMic(); return@setOnClickListener }
             if (!Settings.canDrawOverlays(this)) { requestOverlay(); return@setOnClickListener }
-            saveServer()
-            BubbleService.start(this, BubbleService.ACTION_JOIN, code, serverUrlOrNull())
+            BubbleService.start(this, BubbleService.ACTION_JOIN, code)
         }
 
         micPermBtn.setOnClickListener { if (!hasMicPermission()) requestMic() else requestNotif() }
         overlayPermBtn.setOnClickListener { if (!Settings.canDrawOverlays(this)) requestOverlay() }
 
         endBtn.setOnClickListener { BubbleService.start(this, BubbleService.ACTION_END) }
-    }
-
-    private fun serverUrlOrNull(): String? {
-        val s = serverInput.text.toString().trim()
-        return s.ifBlank { null }
-    }
-
-    private fun saveServer() {
-        val s = serverInput.text.toString().trim()
-        getSharedPreferences("gametalk_prefs", MODE_PRIVATE)
-            .edit().putString("server_url", s).apply()
     }
 
     // ---------- الأذونات ----------

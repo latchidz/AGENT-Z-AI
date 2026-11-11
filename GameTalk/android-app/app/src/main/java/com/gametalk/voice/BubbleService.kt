@@ -29,12 +29,15 @@ import org.webrtc.PeerConnection
 
 /**
  * خدمة المكالمة: تعمل في المقدمة (Foreground) وتدير:
- * 1) الاتصال بسيرفر الربط + إعادة الاتصال التلقائية
+ * 1) الإشارة عبر سحابة PeerJS العامة (بدون خادم) + إعادة الاتصال التلقائية
  * 2) محرك WebRTC الصوتي
  * 3) الفقاعة العائمة فوق التطبيقات + زر الإنهاء
  * 4) الإشعار الدائم (كتم / إنهاء)
+ *
+ * تدفق الإشارة v1.1: المنضم هو من يرسل OFFER (لأنه يعرف رمز الغرفة)،
+ * والمنشئ يجيب بـ ANSWER عند استلامه.
  */
-class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener {
+class BubbleService : Service(), Signaling.Callbacks, CallEngine.Listener {
 
     companion object {
         private const val TAG = "BubbleService"
@@ -47,15 +50,13 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
         const val ACTION_END = "com.gametalk.voice.END"
         const val ACTION_TOGGLE_MUTE = "com.gametalk.voice.TOGGLE_MUTE"
         const val EXTRA_CODE = "code"
-        const val EXTRA_SERVER = "server"
 
         private val BACKOFF_STEPS = longArrayOf(2000, 4000, 8000, 16000, 30000)
 
-        fun start(context: Context, action: String, code: String? = null, server: String? = null) {
+        fun start(context: Context, action: String, code: String? = null) {
             val i = Intent(context, BubbleService::class.java)
                 .setAction(action)
                 .putExtra(EXTRA_CODE, code)
-                .putExtra(EXTRA_SERVER, server)
             ContextCompat.startForegroundService(context, i)
         }
     }
@@ -64,17 +65,17 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
     private lateinit var prefs: SharedPreferences
     private lateinit var windowManager: WindowManager
 
-    private var signaling: SignalingClient? = null
+    private var signaling: Signaling? = null
     private var engine: CallEngine? = null
 
     private var role: CallBus.Role = CallBus.Role.CREATOR
     private var roomCode: String? = null
     private var pendingJoinCode: String? = null
-    private var serverUrl: String = ""
 
     private var wsRetryAttempt = 0
-    private var notFoundCount = 0
     private var retryRunnable: Runnable? = null
+    private var offerAttempt = 0
+    private var offerRunnable: Runnable? = null
     private var ending = false
 
     // overlay
@@ -100,13 +101,11 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
                 role = CallBus.Role.CREATOR
                 roomCode = null
                 pendingJoinCode = intent.getStringExtra(EXTRA_CODE)
-                serverUrl = intent.getStringExtra(EXTRA_SERVER) ?: loadServer()
                 beginCall("جارٍ إنشاء الغرفة...")
             }
             ACTION_JOIN -> {
                 role = CallBus.Role.JOINER
                 pendingJoinCode = intent.getStringExtra(EXTRA_CODE)
-                serverUrl = intent.getStringExtra(EXTRA_SERVER) ?: loadServer()
                 beginCall("جارٍ الانضمام...")
             }
             ACTION_TOGGLE_MUTE -> {
@@ -120,15 +119,10 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
         return START_STICKY
     }
 
-    private fun loadServer(): String {
-        val s = prefs.getString("server_url", null)
-        return if (s.isNullOrBlank()) getString(R.string.default_server) else s.trim()
-    }
-
     private fun beginCall(statusMsg: String) {
         ending = false
         wsRetryAttempt = 0
-        notFoundCount = 0
+        offerAttempt = 0
         CallBus.update {
             CallBus.Snapshot(
                 state = CallBus.State.CONNECTING,
@@ -144,18 +138,13 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
 
     private fun connectSignaling() {
         signaling?.close()
-        signaling = SignalingClient(serverUrl, this).also { it.connect() }
+        signaling = PeerSignaling(role, pendingJoinCode, this).also { it.connect() }
     }
 
     // ===================== Signaling Callbacks =====================
 
     override fun onServerConnected() {
-        main.post {
-            when (role) {
-                CallBus.Role.CREATOR -> signaling?.createRoom(pendingJoinCode)
-                CallBus.Role.JOINER -> pendingJoinCode?.let { signaling?.joinRoom(it) }
-            }
-        }
+        // التسجيل في سحابة PeerJS تلقائي عبر OPEN — لا شيء مطلوب هنا
     }
 
     override fun onCreated(code: String) {
@@ -164,7 +153,8 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
             pendingJoinCode = code
             prefs.edit().putString("last_room", code).apply()
             CallBus.update {
-                it.copy(
+                if (it.state == CallBus.State.CONNECTED) it.copy(roomCode = code)
+                else it.copy(
                     state = CallBus.State.WAITING_PEER,
                     roomCode = code,
                     message = "الغرفة جاهزة — شارك الرمز مع صديقك",
@@ -178,36 +168,67 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
     override fun onJoined(code: String) {
         main.post {
             roomCode = code
+            // المنضم يبادر بإرسال OFFER فور تسجيله
             CallBus.update {
-                it.copy(state = CallBus.State.WAITING_PEER, roomCode = code,
-                    message = "تم الدخول — بانتظار مكالمة صديقك...", role = role)
+                it.copy(state = CallBus.State.CONNECTING, roomCode = code,
+                    message = "تم الدخول — جارٍ الاتصال بصديقك...", role = role)
             }
             refreshNotification()
+            startOffering()
+            scheduleOfferRetry(first = false)
         }
     }
 
-    override fun onPeerJoined() {
-        main.post {
-            // نحن المنشئ: نبدأ العرض
-            if (role == CallBus.Role.CREATOR) {
-                CallBus.update { it.copy(state = CallBus.State.CONNECTING,
-                    message = "صديقك انضم — جارٍ تأسيس الاتصال...") }
-                if (engine?.createPeerConnection(this) == true) {
-                    engine?.createOffer { sdp ->
-                        roomCode?.let { signaling?.sendOffer(sdp, it) }
-                    }
-                } else {
-                    failCall("تعذر تشغيل الميكروفون/المحرك الصوتي")
-                }
+    /** المنضم: إنشاء PeerConnection وإرسال عرض */
+    private fun startOffering() {
+        if (ending) return
+        if (engine?.createPeerConnection(this) == true) {
+            engine?.createOffer { sdp ->
+                roomCode?.let { signaling?.sendOffer(sdp, it) }
             }
+        } else {
+            failCall("تعذر تشغيل الميكروفون/المحرك الصوتي")
         }
+    }
+
+    /** إعادة إرسال العرض دورياً حتى يستقبل جواباً (السحابة تُسقط الرسائل الغير متسلمين بعد 5 ثوانٍ) */
+    private fun scheduleOfferRetry(first: Boolean) {
+        offerRunnable?.let { main.removeCallbacks(it) }
+        if (first) {
+            val r = Runnable {
+                if (ending || CallBus.snapshot.state == CallBus.State.CONNECTED) return@Runnable
+                startOffering()
+            }
+            offerRunnable = r
+            main.postDelayed(r, 4000)
+            return
+        }
+        offerAttempt++
+        if (offerAttempt > 45) {
+            failCall("لم يرد صديقك — تأكد أنه أنشأ الغرفة ومن صحة الرمز ثم أعد المحاولة")
+            return
+        }
+        val r = Runnable {
+            if (ending || CallBus.snapshot.state == CallBus.State.CONNECTED) return@Runnable
+            Log.i(TAG, "offer retry #$offerAttempt")
+            startOffering()
+            scheduleOfferRetry(first = false)
+        }
+        offerRunnable = r
+        main.postDelayed(r, 4000)
+    }
+
+    private fun stopOfferRetry() {
+        offerRunnable?.let { main.removeCallbacks(it) }
+        offerRunnable = null
     }
 
     override fun onOffer(sdp: String) {
         main.post {
-            if (role == CallBus.Role.JOINER) {
+            // المنشئ هو من يستقبل العرض ويجيب
+            if (role == CallBus.Role.CREATOR && !ending) {
                 CallBus.update { it.copy(state = CallBus.State.CONNECTING,
-                    message = "جارٍ تأسيس الاتصال...") }
+                    message = "صديقك يريد الاتصال — جارٍ التأسيس...") }
                 if (engine?.createPeerConnection(this) == true) {
                     engine?.acceptOfferAndAnswer(sdp) { answer ->
                         roomCode?.let { signaling?.sendAnswer(answer, it) }
@@ -220,15 +241,22 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
     }
 
     override fun onAnswer(sdp: String) {
-        main.post { engine?.setRemoteAnswer(sdp) }
+        main.post {
+            stopOfferRetry()
+            engine?.setRemoteAnswer(sdp)
+        }
     }
 
     override fun onIce(candidate: JSONObject) {
-        val c = candidate.optJSONObject("candidate") ?: return
+        // الشكل المتوقع: {candidate:"<sdp>", sdpMid:"0", sdpMLineIndex:0}
+        // مع fallback للشكل المغلّف {candidate:{...}} للتوافق
+        val c = candidate.optJSONObject("candidate") ?: candidate
+        val line = c.optString("candidate")
+        if (line.isBlank()) return
         val ice = IceCandidate(
             c.optString("sdpMid", "0"),
             c.optInt("sdpMLineIndex", 0),
-            c.optString("candidate")
+            line
         )
         main.post { engine?.addRemoteIce(ice) }
     }
@@ -259,6 +287,7 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
     }
 
     private fun onCallConnected() {
+        stopOfferRetry()
         vibrateShort()
         CallBus.update { it.copy(state = CallBus.State.CONNECTED,
             message = "متصل — الصوت يعمل الآن", quality = CallBus.Quality.UNKNOWN) }
@@ -270,9 +299,15 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
         // نُنهي اتصال WebRTC فقط ونعيد المصافحة عبر الإشارة
         engine?.closePeerConnection()
         if (role == CallBus.Role.JOINER) {
+            // المنضم يبادر من جديد (الإشارة غالباً ما زالت مسجلة)
+            offerAttempt = 0
             CallBus.update { it.copy(state = CallBus.State.RECONNECTING,
                 message = "إعادة الاتصال التلقائية...") }
-            scheduleWsReconnect(immediate = true)
+            if (signaling?.isOpen == true) {
+                scheduleOfferRetry(first = true)
+            } else {
+                scheduleWsReconnect(immediate = true)
+            }
         } else {
             CallBus.update { it.copy(state = CallBus.State.WAITING_PEER,
                 message = "بانتظار إعادة انضمام صديقك...") }
@@ -283,6 +318,7 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
     override fun onPeerLeft() {
         main.post {
             engine?.closePeerConnection()
+            stopOfferRetry()
             CallBus.update { it.copy(state = CallBus.State.WAITING_PEER,
                 message = "انقطع صديقك — بانتظار عودته...", quality = CallBus.Quality.UNKNOWN) }
             bubble?.setWaiting(true)
@@ -290,22 +326,8 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
         }
     }
 
-    override fun onRoomNotFound() {
-        main.post {
-            notFoundCount++
-            if (role == CallBus.Role.JOINER && notFoundCount <= 6) {
-                // ربما لم تعد غرفة المنشئ بعد — أعد المحاولة
-                main.postDelayed({
-                    if (!ending) pendingJoinCode?.let { signaling?.joinRoom(it) }
-                }, 3000)
-            } else {
-                failCall("الغرفة غير موجودة — اطلب رمزاً جديداً من صديقك")
-            }
-        }
-    }
-
     override fun onRoomFull() {
-        main.post { failCall("الغرفة ممتلئة (جهازان كحد أقصى)") }
+        main.post { failCall("الغرفة مشغولة من جهاز آخر — انتظر قليلاً ثم أعد المحاولة") }
     }
 
     override fun onDisconnected() {
@@ -476,6 +498,7 @@ class BubbleService : Service(), SignalingClient.Callbacks, CallEngine.Listener 
     private fun endCall() {
         ending = true
         retryRunnable?.let { main.removeCallbacks(it) }
+        stopOfferRetry()
         hideEndBtn()
         bubble?.let { try { windowManager.removeView(it) } catch (_: Exception) {} }
         bubble = null
