@@ -1,0 +1,17 @@
+# Android
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+captures/
+*.apk.idsig
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

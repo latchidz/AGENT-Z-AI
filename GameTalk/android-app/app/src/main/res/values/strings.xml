@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GameTalk</string>
+    <!-- ضع هنا رابط سيرفرك بعد نشره مجاناً على Render (انظر دليل التشغيل) -->
+    <string name="default_server">wss://CHANGE-ME.onrender.com</string>
+</resources>

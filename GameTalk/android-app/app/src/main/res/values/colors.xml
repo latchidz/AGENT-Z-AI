@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#0B0F1A</color>
+    <color name="surface_dark">#141B2E</color>
+    <color name="surface_stroke">#232F4B</color>
+    <color name="neon_blue">#12E2FF</color>
+    <color name="neon_blue_dark">#0A66FF</color>
+    <color name="text_primary">#EAF0FF</color>
+    <color name="text_secondary">#8B97B8</color>
+    <color name="connected">#2BE880</color>
+    <color name="waiting">#12E2FF</color>
+    <color name="reconnecting">#FFC93C</color>
+    <color name="error">#FF4757</color>
+    <color name="neutral">#9AA6B2</color>
+    <color name="danger_btn">#FF3B5C</color>
+</resources>
